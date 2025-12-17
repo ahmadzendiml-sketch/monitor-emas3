@@ -22,8 +22,6 @@ treasury_info = "Belum ada info treasury."
 treasury_info_update_event = asyncio.Event()
 
 telegram_app = None
-treasury_client = None
-usd_idr_client = None
 
 def format_rupiah(nominal):
     try:
@@ -61,25 +59,30 @@ def calc_30jt(h):
     except:
         return "-"
 
-async def fetch_usd_idr_price():
-    global usd_idr_client
+async def fetch_usd_idr_price(client):
     url = "https://www.google.com/finance/quote/USD-IDR"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Connection": "keep-alive",
     }
     try:
-        response = await usd_idr_client.get(url, headers=headers)
+        response = await client.get(url, headers=headers, follow_redirects=True)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, "html.parser")
         price_div = soup.find("div", class_="YMlKec fxKbKc")
         if price_div:
             return price_div.text.strip()
+        data_div = soup.find("div", {"data-last-price": True})
+        if data_div:
+            return data_div.get("data-last-price")
     except Exception as e:
-        print("Error fetching USD/IDR price:", e)
+        print(f"Error fetching USD/IDR price: {e}")
     return None
 
 async def api_loop():
-    global last_buy, treasury_client
+    global last_buy
     
     api_url = "https://api.treasury.id/api/v1/antigrvty/gold/rate"
     shown_updates = set()
@@ -87,24 +90,31 @@ async def api_loop():
     limits = httpx.Limits(max_keepalive_connections=10, max_connections=20)
     
     async with httpx.AsyncClient(
-        timeout=httpx.Timeout(3.0, connect=1.0),
+        timeout=httpx.Timeout(10.0, connect=5.0),
         limits=limits,
         http2=True
     ) as client:
-        treasury_client = client
-        poll_interval = 0.05
+        poll_interval = 0.5
+        
+        print("API Loop started...")
         
         while True:
             loop_start = asyncio.get_event_loop().time()
             
             try:
                 response = await client.post(api_url)
+                print(f"API Response status: {response.status_code}")
                 
                 if response.status_code == 200:
-                    data = response.json().get("data", {})
+                    json_data = response.json()
+                    print(f"API Response: {json_data}")
+                    
+                    data = json_data.get("data", {})
                     buying_rate = int(data.get("buying_rate", 0))
                     selling_rate = int(data.get("selling_rate", 0))
                     updated_at = data.get("updated_at")
+                    
+                    print(f"Parsed - Buy: {buying_rate}, Sell: {selling_rate}, Updated: {updated_at}")
                     
                     if updated_at and updated_at not in shown_updates:
                         status = "➖"
@@ -125,6 +135,7 @@ async def api_loop():
                             history.append(row)
                             if len(history) > 1441:
                                 del history[:-1441]
+                            print(f"History count: {len(history)}")
                         
                         last_buy = buying_rate
                         shown_updates.add(updated_at)
@@ -135,50 +146,55 @@ async def api_loop():
                         
                         update_event.set()
                     
-                    poll_interval = 0.05
+                    poll_interval = 0.5
+                else:
+                    print(f"API returned non-200: {response.status_code}")
+                    poll_interval = 2.0
                     
-            except httpx.TimeoutException:
-                poll_interval = 0.1
+            except httpx.TimeoutException as e:
+                print(f"API Timeout: {e}")
+                poll_interval = 1.0
             except Exception as e:
                 print(f"Error in api_loop: {e}")
-                poll_interval = 0.2
+                poll_interval = 2.0
             
             elapsed = asyncio.get_event_loop().time() - loop_start
-            sleep_time = max(0.01, poll_interval - elapsed)
+            sleep_time = max(0.1, poll_interval - elapsed)
             await asyncio.sleep(sleep_time)
 
 async def usd_idr_loop():
-    global usd_idr_client
-    
     async with httpx.AsyncClient(
-        timeout=httpx.Timeout(5.0, connect=2.0),
-        http2=True
+        timeout=httpx.Timeout(10.0, connect=5.0),
+        http2=False
     ) as client:
-        usd_idr_client = client
+        print("USD/IDR Loop started...")
         
         while True:
             try:
-                price_str = await fetch_usd_idr_price()
-                if price_str:
-                    price_float = parse_price_to_float(price_str)
-                    if price_float is not None:
-                        async with usd_idr_lock:
-                            if not usd_idr_history or usd_idr_history[-1]["price"] != price_str:
-                                wib_now = datetime.utcnow() + timedelta(hours=7)
-                                usd_idr_history.append({
-                                    "price": price_str,
-                                    "time": wib_now.strftime("%H:%M:%S")
-                                })
-                                if len(usd_idr_history) > 11:
-                                    del usd_idr_history[:-11]
-                                usd_idr_update_event.set()
+                price_str = await fetch_usd_idr_price(client)
+                print(f"USD/IDR price fetched: {price_str}")
                 
-                await asyncio.sleep(0.5)
+                if price_str:
+                    async with usd_idr_lock:
+                        if not usd_idr_history or usd_idr_history[-1]["price"] != price_str:
+                            wib_now = datetime.utcnow() + timedelta(hours=7)
+                            usd_idr_history.append({
+                                "price": price_str,
+                                "time": wib_now.strftime("%H:%M:%S")
+                            })
+                            if len(usd_idr_history) > 11:
+                                del usd_idr_history[:-11]
+                            print(f"USD/IDR history count: {len(usd_idr_history)}")
+                            usd_idr_update_event.set()
+                
+                await asyncio.sleep(2.0)
             except Exception as e:
-                print("Error in usd_idr_loop:", e)
-                await asyncio.sleep(0.5)
+                print(f"Error in usd_idr_loop: {e}")
+                await asyncio.sleep(2.0)
 
 async def broadcast_loop():
+    print("Broadcast Loop started...")
+    
     while True:
         try:
             tasks = [
@@ -205,11 +221,13 @@ async def broadcast_loop():
             
             if active_connections:
                 msg = await prepare_broadcast_message()
+                print(f"Broadcasting to {len(active_connections)} clients")
                 
                 async def send_to_client(ws):
                     try:
-                        await asyncio.wait_for(ws.send_text(msg), timeout=2.0)
-                    except:
+                        await asyncio.wait_for(ws.send_text(msg), timeout=5.0)
+                    except Exception as e:
+                        print(f"Failed to send to client: {e}")
                         active_connections.discard(ws)
                 
                 await asyncio.gather(
@@ -219,7 +237,7 @@ async def broadcast_loop():
                 
         except Exception as e:
             print(f"Broadcast error: {e}")
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.5)
 
 async def prepare_broadcast_message():
     async with history_lock:
@@ -347,15 +365,21 @@ html = """
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
         #totalData { color: #ff5722; font-size: 1.1em; }
         .dark-mode #totalData { color: #ffb300; }
+        #statusConnection { padding: 5px 10px; border-radius: 5px; font-weight: bold; }
+        .connected { background: #4caf50; color: white; }
+        .disconnected { background: #f44336; color: white; }
     </style>
 </head>
 <body>
     <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px;">
         <h2 style="margin:0;"><span class="live-indicator"></span>MONITORING Harga Emas Treasury</h2>
-        <button class="theme-toggle-btn" id="themeBtn" onclick="toggleTheme()" title="Ganti Tema">🌙</button>
+        <div>
+            <span id="statusConnection" class="disconnected">Disconnected</span>
+            <button class="theme-toggle-btn" id="themeBtn" onclick="toggleTheme()" title="Ganti Tema">🌙</button>
+        </div>
     </div>
     <div id="jam" style="font-size:1.3em; color:#ff1744; font-weight:bold; margin-bottom:15px;"></div>
-    <p id="totalData"></p>
+    <p id="totalData">Total Data: 0 baris</p>
     <table id="tabel" class="display" style="width:100%">
         <thead>
             <tr>
@@ -442,6 +466,8 @@ html = """
         function updateTable(history) {
             document.getElementById("totalData").textContent = "Total Data: " + history.length + " baris";
             
+            if (history.length === 0) return;
+            
             history.sort(function(a, b) {
                 return new Date(b.created_at) - new Date(a.created_at);
             });
@@ -459,36 +485,64 @@ html = """
         }
 
         var ws = null;
-        var reconnectDelay = 100;
+        var reconnectDelay = 500;
+        var statusEl = document.getElementById("statusConnection");
 
         function connectWS() {
-            ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
+            var wsUrl = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws";
+            console.log("Connecting to:", wsUrl);
+            
+            ws = new WebSocket(wsUrl);
             
             ws.onopen = function() {
                 console.log("WebSocket connected");
-                reconnectDelay = 100;
+                statusEl.textContent = "Connected";
+                statusEl.className = "connected";
+                reconnectDelay = 500;
             };
             
             ws.onmessage = function(event) {
-                var data = JSON.parse(event.data);
-                console.log("Received data, history length:", data.history ? data.history.length : 0);
-                if (data.ping) return;
-                if (data.history) updateTable(data.history);
-                if (data.usd_idr_history) updateUsdIdrPrice(data.usd_idr_history);
-                if (data.treasury_info !== undefined) updateTreasuryInfo(data.treasury_info);
+                try {
+                    var data = JSON.parse(event.data);
+                    console.log("Received:", data);
+                    
+                    if (data.ping) {
+                        console.log("Ping received");
+                        return;
+                    }
+                    
+                    if (data.history && data.history.length > 0) {
+                        console.log("History length:", data.history.length);
+                        updateTable(data.history);
+                    }
+                    
+                    if (data.usd_idr_history && data.usd_idr_history.length > 0) {
+                        console.log("USD/IDR history length:", data.usd_idr_history.length);
+                        updateUsdIdrPrice(data.usd_idr_history);
+                    }
+                    
+                    if (data.treasury_info !== undefined) {
+                        updateTreasuryInfo(data.treasury_info);
+                    }
+                } catch (e) {
+                    console.error("Error parsing message:", e);
+                }
             };
             
-            ws.onclose = function() {
-                console.log("WebSocket closed, reconnecting...");
+            ws.onclose = function(e) {
+                console.log("WebSocket closed:", e.code, e.reason);
+                statusEl.textContent = "Disconnected";
+                statusEl.className = "disconnected";
                 setTimeout(connectWS, reconnectDelay);
-                reconnectDelay = Math.min(reconnectDelay * 1.5, 3000);
+                reconnectDelay = Math.min(reconnectDelay * 1.5, 5000);
             };
             
             ws.onerror = function(err) {
-                console.log("WebSocket error:", err);
+                console.error("WebSocket error:", err);
                 ws.close();
             };
         }
+        
         connectWS();
 
         function updateTreasuryInfo(info) {
@@ -579,6 +633,8 @@ html = """
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    print("Starting background tasks...")
+    
     task1 = asyncio.create_task(api_loop())
     task2 = asyncio.create_task(usd_idr_loop())
     task3 = asyncio.create_task(broadcast_loop())
@@ -586,6 +642,8 @@ async def lifespan(app: FastAPI):
     await start_telegram_bot()
     
     yield
+    
+    print("Shutting down...")
     
     task1.cancel()
     task2.cancel()
@@ -604,10 +662,25 @@ app = FastAPI(lifespan=lifespan)
 async def index():
     return HTMLResponse(html)
 
+@app.get("/debug")
+async def debug():
+    async with history_lock:
+        h_count = len(history)
+    async with usd_idr_lock:
+        u_count = len(usd_idr_history)
+    return {
+        "history_count": h_count,
+        "usd_idr_count": u_count,
+        "active_connections": len(active_connections),
+        "treasury_info": treasury_info[:50] + "..." if len(treasury_info) > 50 else treasury_info
+    }
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     active_connections.add(websocket)
+    
+    print(f"New WebSocket connection. Total: {len(active_connections)}")
     
     try:
         async with history_lock:
@@ -615,6 +688,8 @@ async def websocket_endpoint(websocket: WebSocket):
         
         async with usd_idr_lock:
             usd_idr_snapshot = list(usd_idr_history)
+        
+        print(f"Sending initial data - History: {len(history_snapshot)}, USD/IDR: {len(usd_idr_snapshot)}")
         
         initial_data = {
             "history": [
@@ -652,6 +727,7 @@ async def websocket_endpoint(websocket: WebSocket):
         pass
     finally:
         active_connections.discard(websocket)
+        print(f"WebSocket disconnected. Total: {len(active_connections)}")
 
 if __name__ == "__main__":
     import uvicorn
