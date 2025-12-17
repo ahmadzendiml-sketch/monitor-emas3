@@ -146,22 +146,22 @@ async def get_http_client():
             http2=True  # HTTP/2 untuk multiplexing
         )
     return _http_client
-
 async def fetch_usd_idr_price():
+    """Original logic dengan minor optimization"""
     url = "https://www.google.com/finance/quote/USD-IDR"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
     }
     try:
         client = await get_http_client()
         response = await client.get(url, headers=headers)
         response.raise_for_status()
-        soup = BeautifulSoup(response.text, "lxml")  # lxml lebih cepat dari html.parser
+        soup = BeautifulSoup(response.text, "html.parser")
         price_div = soup.find("div", class_="YMlKec fxKbKc")
         if price_div:
             return price_div.text.strip()
     except Exception as e:
-        print(f"Error fetching USD/IDR: {e}")
+        print("Error fetching USD/IDR price:", e)
     return None
 
 # ==================== BACKGROUND LOOPS (Optimized) ====================
