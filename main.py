@@ -38,12 +38,39 @@ def parse_price_to_float(price_str):
 
 # ==================== FETCH FUNCTIONS ====================
 async def fetch_usd_idr_price():
+    """Fetch USD/IDR price dengan bypass consent Google"""
     url = "https://www.google.com/finance/quote/USD-IDR"
+    
+    # Headers lengkap seperti browser asli
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9,id;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": '"Windows"',
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1",
     }
+    
+    # Cookies untuk bypass consent GDPR
+    cookies = {
+        "CONSENT": "YES+cb.20231208-04-p0.en+FX+410",
+        "SOCS": "CAISHAgCEhJnd3NfMjAyMzEyMDgtMF9SQzEaAmVuIAEaBgiA_LmqBg",
+    }
+    
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(
+            timeout=10,
+            follow_redirects=True,  # Ikuti redirect
+            cookies=cookies
+        ) as client:
             response = await client.get(url, headers=headers)
             response.raise_for_status()
             soup = BeautifulSoup(response.text, "html.parser")
@@ -51,7 +78,8 @@ async def fetch_usd_idr_price():
             if price_div:
                 return price_div.text.strip()
     except Exception as e:
-        print("Error fetching USD/IDR price:", e)
+        print(f"Error fetching USD/IDR price: {e}")
+    
     return None
 
 # ==================== BACKGROUND LOOPS ====================
@@ -603,9 +631,9 @@ async def lifespan(app: FastAPI):
     task1 = asyncio.create_task(api_loop())
     task2 = asyncio.create_task(usd_idr_loop())
     print("🚀 API loop: 50ms interval (20x per detik!) - GASSPOL!")
-    print("✅ USD/IDR loop started (tetap 1 detik)")
+    print("✅ USD/IDR loop started (1 detik)")
     
-    # Start telegram bot (tidak pakai create_task karena sudah polling sendiri)
+    # Start telegram bot
     tg_app = await start_telegram_bot()
     
     print("=" * 50)
