@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 import httpx
 from bs4 import BeautifulSoup
 
+# ==================== GLOBAL VARIABLES ====================
 history = []
 last_buy = None
 active_connections = set()
@@ -19,10 +20,14 @@ usd_idr_update_event = asyncio.Event()
 treasury_info = "Belum ada info treasury."
 treasury_info_update_event = asyncio.Event()
 
+# Simpan referensi telegram app untuk shutdown
 telegram_app = None
+
+# ⚡ GLOBAL HTTP CLIENT untuk connection pooling
 treasury_client = None
 usd_idr_client = None
 
+# ==================== HELPER FUNCTIONS ====================
 def format_rupiah(nominal):
     try:
         return "{:,}".format(int(nominal)).replace(",", ".")
@@ -35,6 +40,7 @@ def parse_price_to_float(price_str):
     except:
         return None
 
+# ==================== FETCH FUNCTIONS ====================
 async def fetch_usd_idr_price():
     global usd_idr_client
     url = "https://www.google.com/finance/quote/USD-IDR"
@@ -52,26 +58,38 @@ async def fetch_usd_idr_price():
         print("Error fetching USD/IDR price:", e)
     return None
 
+# ==================== OPTIMIZED BACKGROUND LOOPS ====================
 async def api_loop():
+    """
+    ⚡ ULTRA-FAST Treasury API Loop
+    - Polling setiap 50-100ms
+    - Connection pooling
+    - Minimal latency
+    """
     global last_buy, history, treasury_client
     
     api_url = "https://api.treasury.id/api/v1/antigrvty/gold/rate"
     shown_updates = set()
     
+    # ⚡ Gunakan limits untuk concurrent connections
     limits = httpx.Limits(max_keepalive_connections=10, max_connections=20)
     
     async with httpx.AsyncClient(
-        timeout=httpx.Timeout(3.0, connect=1.0),
+        timeout=httpx.Timeout(3.0, connect=1.0),  # ⚡ Timeout lebih kecil
         limits=limits,
-        http2=True
+        http2=True  # ⚡ HTTP/2 untuk kecepatan
     ) as client:
         treasury_client = client
-        poll_interval = 0.05
+        
+        # ⚡ Variables untuk adaptive polling
+        last_success_time = asyncio.get_event_loop().time()
+        poll_interval = 0.05  # ⚡ Start dengan 50ms
         
         while True:
             loop_start = asyncio.get_event_loop().time()
             
             try:
+                # ⚡ Fire request tanpa blocking
                 response = await client.post(api_url)
                 
                 if response.status_code == 200:
@@ -81,6 +99,7 @@ async def api_loop():
                     updated_at = data.get("updated_at")
                     
                     if updated_at and updated_at not in shown_updates:
+                        # ⚡ NEW DATA DETECTED!
                         status = "➖"
                         if last_buy is not None:
                             if buying_rate > last_buy:
@@ -99,27 +118,111 @@ async def api_loop():
                         last_buy = buying_rate
                         shown_updates.add(updated_at)
                         
+                        # ⚡ Limit shown_updates size untuk memory efficiency
                         if len(shown_updates) > 2000:
+                            # Hapus yang lama
                             shown_updates.clear()
                             shown_updates.add(updated_at)
                         
+                        # ⚡ INSTANT BROADCAST
                         update_event.set()
+                        
+                        print(f"⚡ NEW DATA: Buy={buying_rate} Sell={selling_rate} @ {updated_at}")
                     
-                    poll_interval = 0.05
+                    last_success_time = loop_start
+                    poll_interval = 0.05  # ⚡ Reset ke 50ms setelah sukses
                     
             except httpx.TimeoutException:
+                # ⚡ Timeout, langsung retry
                 poll_interval = 0.1
             except Exception as e:
                 print(f"Error in api_loop: {e}")
-                poll_interval = 0.2
+                poll_interval = 0.2  # ⚡ Slight backoff on error
             
+            # ⚡ Calculate actual sleep time (compensate for processing time)
             elapsed = asyncio.get_event_loop().time() - loop_start
-            sleep_time = max(0.01, poll_interval - elapsed)
+            sleep_time = max(0.01, poll_interval - elapsed)  # ⚡ Minimum 10ms
             await asyncio.sleep(sleep_time)
+
+
+async def api_loop_parallel():
+    """
+    ⚡⚡ EXTREME MODE: Multiple parallel requests
+    Gunakan ini jika API treasury bisa handle banyak request
+    """
+    global last_buy, history
+    
+    api_url = "https://api.treasury.id/api/v1/antigrvty/gold/rate"
+    shown_updates = set()
+    
+    limits = httpx.Limits(max_keepalive_connections=20, max_connections=50)
+    
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(2.0, connect=0.5),
+        limits=limits,
+        http2=True
+    ) as client:
+        
+        async def single_fetch():
+            """Single fetch attempt"""
+            try:
+                response = await client.post(api_url)
+                if response.status_code == 200:
+                    return response.json().get("data", {})
+            except:
+                pass
+            return None
+        
+        while True:
+            try:
+                # ⚡ Fire 3 parallel requests, ambil yang pertama berhasil
+                tasks = [single_fetch() for _ in range(3)]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                
+                for data in results:
+                    if data and isinstance(data, dict):
+                        buying_rate = int(data.get("buying_rate", 0))
+                        selling_rate = int(data.get("selling_rate", 0))
+                        updated_at = data.get("updated_at")
+                        
+                        if updated_at and updated_at not in shown_updates:
+                            status = "➖"
+                            if last_buy is not None:
+                                if buying_rate > last_buy:
+                                    status = "🚀"
+                                elif buying_rate < last_buy:
+                                    status = "🔻"
+                            
+                            row = {
+                                "buying_rate": buying_rate,
+                                "selling_rate": selling_rate,
+                                "status": status,
+                                "created_at": updated_at
+                            }
+                            history.append(row)
+                            history[:] = history[-1441:]
+                            last_buy = buying_rate
+                            shown_updates.add(updated_at)
+                            
+                            if len(shown_updates) > 2000:
+                                shown_updates.clear()
+                                shown_updates.add(updated_at)
+                            
+                            update_event.set()
+                            print(f"⚡ NEW DATA: Buy={buying_rate} Sell={selling_rate}")
+                        break  # Data sudah diproses
+                
+                await asyncio.sleep(0.03)  # ⚡ 30ms between batches
+                
+            except Exception as e:
+                print(f"Error in parallel loop: {e}")
+                await asyncio.sleep(0.1)
+
 
 async def usd_idr_loop():
     global usd_idr_history, usd_idr_client
     
+    # ⚡ Optimized client
     async with httpx.AsyncClient(
         timeout=httpx.Timeout(5.0, connect=2.0),
         http2=True
@@ -141,14 +244,20 @@ async def usd_idr_loop():
                             usd_idr_history[:] = usd_idr_history[-11:]
                             usd_idr_update_event.set()
                 
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.5)  # ⚡ Lebih cepat dari 1 detik
             except Exception as e:
                 print("Error in usd_idr_loop:", e)
                 await asyncio.sleep(0.5)
 
+
+# ==================== OPTIMIZED WEBSOCKET BROADCASTER ====================
 async def broadcast_loop():
+    """
+    ⚡ Dedicated broadcast loop untuk mengirim update ke semua clients
+    """
     while True:
         try:
+            # Tunggu salah satu event
             await asyncio.wait(
                 [
                     asyncio.create_task(update_event.wait()),
@@ -158,6 +267,7 @@ async def broadcast_loop():
                 return_when=asyncio.FIRST_COMPLETED
             )
             
+            # Clear events
             if update_event.is_set():
                 update_event.clear()
             if usd_idr_update_event.is_set():
@@ -165,12 +275,16 @@ async def broadcast_loop():
             if treasury_info_update_event.is_set():
                 treasury_info_update_event.clear()
             
+            # ⚡ Broadcast ke semua connections secara parallel
             if active_connections:
                 msg = prepare_broadcast_message()
                 
                 async def send_to_client(ws):
                     try:
-                        await asyncio.wait_for(ws.send_text(msg), timeout=1.0)
+                        await asyncio.wait_for(
+                            ws.send_text(msg),
+                            timeout=1.0  # ⚡ 1 second timeout per client
+                        )
                     except:
                         active_connections.discard(ws)
                 
@@ -183,7 +297,10 @@ async def broadcast_loop():
             print(f"Broadcast error: {e}")
             await asyncio.sleep(0.1)
 
+
 def prepare_broadcast_message():
+    """⚡ Prepare message once, send to all"""
+    
     def calc_20jt(h):
         try:
             val = int((20000000 / h["buying_rate"]) * h["selling_rate"] - 19315000)
@@ -224,7 +341,10 @@ def prepare_broadcast_message():
         "treasury_info": treasury_info
     })
 
+
+# ==================== TELEGRAM BOT ====================
 async def start_telegram_bot():
+    """Start Telegram bot dan return app instance untuk shutdown nanti"""
     global telegram_app
     
     try:
@@ -232,19 +352,24 @@ async def start_telegram_bot():
         from telegram import Update
         from telegram.ext import ContextTypes
     except ImportError:
-        print("python-telegram-bot not installed!")
+        print("❌ python-telegram-bot not installed!")
+        print("   Install dengan: pip install python-telegram-bot")
         return None
 
     TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
     if not TELEGRAM_TOKEN:
-        print("TELEGRAM_TOKEN not set!")
+        print("❌ TELEGRAM_TOKEN not set!")
+        print("   Set dengan: export TELEGRAM_TOKEN='your_bot_token'")
         return None
 
     async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text("Bot aktif! Gunakan /atur <teks> untuk mengubah info treasury.")
+        print(f"✅ /start command dari user: {update.effective_user.id}")
+        await update.message.reply_text("🤖 Bot aktif! Gunakan /atur <teks> untuk mengubah info treasury.")
 
     async def atur_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         global treasury_info
+        print(f"✅ /atur command dari user: {update.effective_user.id}")
+        
         text = update.message.text.partition(' ')[2]
         
         if text:
@@ -252,11 +377,13 @@ async def start_telegram_bot():
             text = text.replace("\n", "<br>")
             treasury_info = text
             treasury_info_update_event.set()
-            await update.message.reply_text("Info Treasury berhasil diubah!")
+            await update.message.reply_text("✅ Info Treasury berhasil diubah!")
         else:
-            await update.message.reply_text("Gunakan: /atur <kalimat info>")
+            await update.message.reply_text("❌ Gunakan: /atur <kalimat info>")
 
     try:
+        print("🔄 Initializing Telegram bot...")
+        
         telegram_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
         telegram_app.add_handler(CommandHandler("start", start_handler))
         telegram_app.add_handler(CommandHandler("atur", atur_handler))
@@ -268,24 +395,31 @@ async def start_telegram_bot():
             allowed_updates=["message"]
         )
         
-        print("Telegram bot started!")
+        print("✅ Telegram bot started successfully!")
         return telegram_app
         
     except Exception as e:
-        print(f"Error starting Telegram bot: {e}")
+        print(f"❌ Error starting Telegram bot: {e}")
+        import traceback
+        traceback.print_exc()
         return None
+
 
 async def stop_telegram_bot():
     global telegram_app
     
     if telegram_app:
         try:
+            print("🔄 Stopping Telegram bot...")
             await telegram_app.updater.stop()
             await telegram_app.stop()
             await telegram_app.shutdown()
+            print("✅ Telegram bot stopped!")
         except Exception as e:
-            print(f"Error stopping Telegram bot: {e}")
+            print(f"❌ Error stopping Telegram bot: {e}")
 
+
+# ==================== HTML TEMPLATE ====================
 html = """
 <!DOCTYPE html>
 <html>
@@ -295,14 +429,41 @@ html = """
     <style>
         body { font-family: Arial; margin: 40px; background: #fff; color: #222; transition: background 0.3s, color 0.3s; }
         table.dataTable thead th { font-weight: bold; }
-        th.waktu, td.waktu { width: 150px; min-width: 100px; max-width: 180px; white-space: nowrap; text-align: left; }
-        th.profit, td.profit { width: 90px; min-width: 80px; max-width: 100px; white-space: nowrap; text-align: left; }
+        th.waktu, td.waktu {
+            width: 150px;
+            min-width: 100px;
+            max-width: 180px;
+            white-space: nowrap;
+            text-align: left;
+        }
+        th.profit, td.profit {
+            width: 90px;
+            min-width: 80px;
+            max-width: 100px;
+            white-space: nowrap;
+            text-align: left;
+        }
         .dark-mode { background: #181a1b !important; color: #e0e0e0 !important; }
         .dark-mode #jam { color: #ffb300 !important; }
         .dark-mode table.dataTable { background: #23272b !important; color: #e0e0e0 !important; }
         .dark-mode table.dataTable thead th { background: #23272b !important; color: #ffb300 !important; }
         .dark-mode table.dataTable tbody td { background: #23272b !important; color: #e0e0e0 !important; }
-        .theme-toggle-btn { padding: 0; border: none; border-radius: 50%; background: #222; color: #fff; font-weight: bold; cursor: pointer; transition: background 0.3s, color 0.3s; font-size: 1.5em; width: 44px; height: 44px; display: flex; align-items: center; justify-content: center; }
+        .theme-toggle-btn {
+            padding: 0;
+            border: none;
+            border-radius: 50%;
+            background: #222;
+            color: #fff;
+            font-weight: bold;
+            cursor: pointer;
+            transition: background 0.3s, color 0.3s;
+            font-size: 1.5em;
+            width: 44px;
+            height: 44px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
         .theme-toggle-btn:hover { background: #444; }
         .dark-mode .theme-toggle-btn { background: #ffb300; color: #222; }
         .dark-mode .theme-toggle-btn:hover { background: #ffd54f; }
@@ -323,6 +484,7 @@ html = """
         #isiTreasury::-webkit-scrollbar { display: none; }
         .dark-mode #isiTreasury { color: #00E124; text-shadow: 1px 1px #00B31C; }
         #ingfo { width: 218px; border: 1px solid #ccc; padding: 10px; height: 378px; overflow-y: auto; }
+        /* ⚡ LIVE INDICATOR */
         .live-indicator { display: inline-block; width: 10px; height: 10px; background: #00ff00; border-radius: 50%; margin-right: 8px; animation: pulse 1s infinite; }
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
     </style>
@@ -434,30 +596,34 @@ html = """
             table.page('first').draw(false);
         }
 
+        // ⚡ OPTIMIZED WEBSOCKET dengan auto-reconnect cepat
         var ws = null;
-        var reconnectDelay = 100;
+        var reconnectDelay = 100; // ⚡ Start dengan 100ms
 
         function connectWS() {
             ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
             
             ws.onopen = function() {
-                reconnectDelay = 100;
+                console.log("⚡ WebSocket connected!");
+                reconnectDelay = 100; // Reset delay
             };
             
             ws.onmessage = function(event) {
                 var data = JSON.parse(event.data);
-                if (data.ping) return;
+                if (data.ping) return; // Ignore ping
                 if (data.history) updateTable(data.history);
                 if (data.usd_idr_history) updateUsdIdrPrice(data.usd_idr_history);
                 if (data.treasury_info !== undefined) updateTreasuryInfo(data.treasury_info);
             };
             
             ws.onclose = function() {
+                console.log("WebSocket closed, reconnecting in " + reconnectDelay + "ms...");
                 setTimeout(connectWS, reconnectDelay);
-                reconnectDelay = Math.min(reconnectDelay * 1.5, 3000);
+                reconnectDelay = Math.min(reconnectDelay * 1.5, 3000); // Max 3 seconds
             };
             
             ws.onerror = function(err) {
+                console.error("WebSocket error:", err);
                 ws.close();
             };
         }
@@ -547,15 +713,36 @@ html = """
 </html>
 """
 
+
+# ==================== LIFESPAN ====================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    task1 = asyncio.create_task(api_loop())
-    task2 = asyncio.create_task(usd_idr_loop())
-    task3 = asyncio.create_task(broadcast_loop())
+    print("=" * 50)
+    print("⚡ Starting ULTRA-FAST application...")
+    print("=" * 50)
     
-    await start_telegram_bot()
+    # Start background tasks
+    task1 = asyncio.create_task(api_loop())  # Atau gunakan api_loop_parallel()
+    task2 = asyncio.create_task(usd_idr_loop())
+    task3 = asyncio.create_task(broadcast_loop())  # ⚡ Dedicated broadcaster
+    
+    print("✅ API loop started (50ms polling)")
+    print("✅ USD/IDR loop started")
+    print("✅ Broadcast loop started")
+    
+    # Start telegram bot
+    tg_app = await start_telegram_bot()
+    
+    print("=" * 50)
+    print("🚀 All services running at MAXIMUM SPEED!")
+    print("=" * 50)
     
     yield
+    
+    # Shutdown
+    print("=" * 50)
+    print("🛑 Shutting down...")
+    print("=" * 50)
     
     task1.cancel()
     task2.cancel()
@@ -567,12 +754,19 @@ async def lifespan(app: FastAPI):
         await asyncio.gather(task1, task2, task3, return_exceptions=True)
     except:
         pass
+    
+    print("✅ Application stopped!")
 
+
+# ==================== FASTAPI APP ====================
 app = FastAPI(lifespan=lifespan)
 
+
+# ==================== ROUTES ====================
 @app.get("/", response_class=HTMLResponse)
 async def index():
     return HTMLResponse(html)
+
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -603,6 +797,7 @@ async def websocket_endpoint(websocket: WebSocket):
         except:
             return "-"
 
+    # Kirim data awal
     try:
         await websocket.send_text(json.dumps({
             "history": [
@@ -620,23 +815,40 @@ async def websocket_endpoint(websocket: WebSocket):
             "treasury_info": treasury_info
         }))
     except Exception as e:
+        print(f"Error sending initial data: {e}")
         active_connections.discard(websocket)
         return
 
+    # ⚡ Keep connection alive, broadcast_loop handles updates
     try:
         while True:
+            # Just keep the connection open
+            # Data updates are handled by broadcast_loop
             await asyncio.sleep(30)
+            # Send ping to keep alive
             try:
                 await websocket.send_text(json.dumps({"ping": True}))
             except:
                 break
     except WebSocketDisconnect:
-        pass
-    except:
-        pass
+        print("WebSocket disconnected")
+    except Exception as e:
+        print(f"WebSocket error: {e}")
     finally:
         active_connections.discard(websocket)
 
+
+# ==================== MAIN ====================
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(
+        app, 
+        host="0.0.0.0", 
+        port=8000,
+        # ⚡ Optimized uvicorn settings
+        loop="uvloop",  # Faster event loop (install: pip install uvloop)
+        http="httptools",  # Faster HTTP parser (install: pip install httptools)
+        ws="websockets",
+        timeout_keep_alive=30,
+        access_log=False  # Disable access log for speed
+    )
