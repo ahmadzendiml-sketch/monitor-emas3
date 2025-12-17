@@ -1,5 +1,15 @@
+# ==================== CORE ====================
 fastapi
 uvicorn[standard]
-httpx
+httpx[http2]
 beautifulsoup4
 python-telegram-bot
+
+# ==================== SPEED BOOSTERS ====================
+orjson
+lxml
+uvloop; sys_platform != "win32"
+httptools
+
+# ==================== OPTIONAL (jika perlu) ====================
+# websockets
